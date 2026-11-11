@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Office Scan</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0f13; font-family: "Segoe UI", system-ui, sans-serif; color: #f2f4f7; }
+  canvas { display: block; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(8, 11, 16, .6); cursor: pointer; }
+  #card { max-width: 440px; margin: 16px; padding: 28px 30px; border-radius: 14px; background: rgba(18, 23, 31, .94); border: 1px solid rgba(255,255,255,.12); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+  #card h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; }
+  #card p { margin: 0 0 16px; color: #b8c0cc; font-size: 14px; line-height: 1.5; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 14px; margin-bottom: 20px; }
+  .keys b { font-weight: 600; color: #fff; background: rgba(255,255,255,.1); border-radius: 6px; padding: 2px 8px; text-align: center; white-space: nowrap; }
+  .keys span { color: #c9d0da; align-self: center; }
+  #go { display: block; width: 100%; padding: 12px; border: 0; border-radius: 9px; background: #e9a23b; color: #1b1407; font-size: 15px; font-weight: 600; cursor: pointer; }
+  #go:disabled { background: #4a505a; color: #c9d0da; cursor: progress; }
+  #hud { position: fixed; left: 16px; bottom: 14px; font-size: 12px; color: rgba(255,255,255,.8); text-shadow: 0 1px 3px rgba(0,0,0,.9); pointer-events: none; }
+  #look { position: fixed; right: 14px; top: 14px; width: 250px; padding: 12px 14px; border-radius: 10px; background: rgba(18, 23, 31, .92); border: 1px solid rgba(255,255,255,.14); font-size: 12px; display: none; }
+  #look b { display: block; margin-bottom: 8px; font-size: 13px; }
+  #look label { display: grid; grid-template-columns: 76px 1fr 34px; gap: 8px; align-items: center; margin: 5px 0; color: #c9d0da; }
+  #look input { width: 100%; accent-color: #e9a23b; }
+  #look i { font-style: normal; text-align: right; color: #fff; font-variant-numeric: tabular-nums; }
+  #look button { margin-top: 8px; width: 100%; padding: 6px; border: 0; border-radius: 6px; background: rgba(255,255,255,.12); color: #fff; cursor: pointer; font-size: 12px; }
+  #look .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 8px; }
+  #look .presets button { margin: 0; padding: 5px 0; }
+  #look p { margin: 8px 0 0; color: #9aa3af; font-size: 11px; line-height: 1.4; user-select: text; }
+  #dot { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,255,255,.7); box-shadow: 0 0 3px rgba(0,0,0,.8); pointer-events: none; display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.min.js", "three/addons/": "./addons/", "@sparkjsdev/spark": "./spark.module.js" } }
+</script>
+</head>
+<body>
+<div id="start">
+  <div id="card">
+    <h1>Office Scan</h1>
+    <p>A walkable 3D reconstruction of the office, computed from phone photos and videos of the room. Views between the shots were cleaned up with an AI repair step; press F to see the real photo taken nearest to where you stand.</p>
+    <div class="keys">
+      <b>W A S D</b><span>Walk (arrow keys also work)</span>
+      <b>Mouse</b><span>Look around</span>
+      <b>Shift</b><span>Walk faster</span>
+      <b>Q / E</b><span>Lower / raise your eye height</span>
+      <b>F</b><span>Jump to the nearest real photo for full detail (press again for the next one)</span>
+      <b>G</b><span>Picture controls: brightness, contrast, colour, haze cut, sharpening</span>
+      <b>X</b><span>Picture touch-up on/off (off shows the plain scan)</span>
+      <b>N</b><span>Ghost mode: pass through furniture and walls (on/off)</span>
+      <b>Esc</b><span>Release the mouse</span>
+    </div>
+    <button id="go" disabled>Loading scan…</button>
+  </div>
+</div>
+<div id="dot"></div>
+<div id="hud"></div>
+<div id="look"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
+
+const params = new URLSearchParams(location.search);
+const SHARPEN_DEFAULT = true;    // verified against a screenshot: colours unchanged, edges crisper
+const startEl = document.getElementById('start'), go = document.getElementById('go'), dot = document.getElementById('dot'), hud = document.getElementById('hud');
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const canvas = renderer.domElement;
+
+// Interactive viewing is drawn into an off-screen buffer and then sharpened. Splats must be blended on the same
+// raw colour values they were trained with, so that buffer is left un-encoded and the ordinary textures (backing
+// sheets, photos) are passed through raw as well. Batch rendering (?batch=) draws straight to the canvas.
+const POST = !params.get('batch');
+const TEX_SPACE = POST ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+const scene = new THREE.Scene();   // dark background, so nothing bright bleeds through thin surfaces
+scene.background = POST ? new THREE.Color().setRGB(0x14 / 255, 0x17 / 255, 0x1b / 255, THREE.LinearSRGBColorSpace) : new THREE.Color(0x14171b);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 300)   // closer to a natural eye/phone view; wider angles stretch the edges;
+// Full-precision splats: Spark's default packing rounds every splat position to 16-bit floats (4-13 mm steps in a
+// room this size) and opacity/colour to 8 bits, which smears fine detail. ?ext=0 switches back for comparison.
+const EXT = params.get('ext') !== '0', BARE = params.get('bare') !== null;
+const num = (k, d) => params.get(k) !== null ? +params.get(k) : d;
+// Splat blur 0.3 is what training used (kept for the Difix renders); 0.15 on screen is closer to the real photos.
+const spark = new SparkRenderer({ renderer, accumExtSplats: EXT, blurAmount: num('blur', params.get('batch') ? 0.3 : 0.15), maxStdDev: num('maxstd', Math.sqrt(8)), minAlpha: num('minalpha', 0.5 / 255) });
+scene.add(spark);
+if (POST) {   // Spark switches to linear-light blending when drawing off-screen, which lifts dark tones into a grey veil; keep the trained blending
+  const before = spark.onBeforeRender.bind(spark);
+  spark.onBeforeRender = (...a) => { before(...a); spark.uniforms.encodeLinear.value = false; };
+}
+
+const cfg = await (await fetch(params.get('scene') || 'scene.json', { cache: 'no-store' })).json();
+// A published copy keeps the scan in pieces (office.parts.json lists them, see make_web.py), because web hosts such
+// as GitHub refuse very large single files. The pieces are downloaded three at a time and fed to the loader in order.
+async function scanParts() {
+  if (params.get('file')) return null;
+  try { const r = await fetch('office.parts.json', { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch (e) { return null; }
+}
+function partsStream(man) {
+  const N = man.parts.length, pending = new Map(); let next = 0, got = 0;
+  const get = async (i, tries = 0) => {
+    try {
+      const r = await fetch(man.parts[i].f); if (!r.ok) throw new Error('HTTP ' + r.status);
+      const b = new Uint8Array(await r.arrayBuffer()); if (b.length !== man.parts[i].bytes) throw new Error('incomplete download');
+      got += b.length; go.textContent = got < man.bytes ? 'Loading scan… ' + Math.floor(100 * got / man.bytes) + '%' : 'Preparing the scan…';
+      return b;
+    } catch (e) {
+      if (tries < 3) { await new Promise(r => setTimeout(r, 1500)); return get(i, tries + 1); }
+      go.textContent = 'Could not load the scan'; hud.textContent = man.parts[i].f + ': ' + e.message + ' — reload the page to try again'; throw e;
+    }
+  };
+  const want = i => { if (i < N && !pending.has(i)) { const p = get(i); p.catch(() => {}); pending.set(i, p); } };
+  return new ReadableStream({ async pull(c) {
+    if (next >= N) { c.close(); return; }
+    for (let k = 0; k < 3; k++) want(next + k);
+    const b = await pending.get(next); pending.delete(next); next++; c.enqueue(b);
+  } });
+}
+const man = await scanParts();
+const mesh = new SplatMesh(man ? { stream: partsStream(man), streamLength: man.bytes, fileName: man.name, fileType: 'ply', extSplats: EXT }
+                               : { url: params.get('file') || 'office.ply', extSplats: EXT });
+mesh.quaternion.set(...cfg.quaternion);
+mesh.scale.setScalar(cfg.scale);
+mesh.position.set(...cfg.position);
+scene.add(mesh);
+
+// backing sheets just behind the real floor and ceiling, coloured from the scan itself
+if (cfg.backing) {
+  const b = cfg.backing, loader = new THREE.TextureLoader();
+  for (const [file, y] of [['back_floor.png', b.floorY], ['back_ceiling.png', b.ceilY]]) {
+    const tex = loader.load(file); tex.colorSpace = TEX_SPACE; tex.flipY = false;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([b.x0, y, b.z0, b.x0 + b.w, y, b.z0, b.x0 + b.w, y, b.z0 + b.d, b.x0, y, b.z0 + b.d], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: tex, alphaTest: 0.5, side: THREE.DoubleSide })));
+  }
+}
+
+let eye = 1.6, baseEye = 1.6, yaw = cfg.start.yaw, pitch = 0, free = false;
+
+// ---- real photos laid over the scan -------------------------------------------------------------
+// Each photo is placed on a sheet locked to the exact position and direction it was taken from.
+// Standing at that spot, the photo lines up with the splats behind it, so you see true photo detail.
+let photos = [];
+try { photos = await (await fetch('photos.json', { cache: 'no-store' })).json(); } catch (e) {}
+mesh.updateMatrixWorld(true);
+for (const p of photos) {
+  p.pos = new THREE.Vector3(...p.c).applyMatrix4(mesh.matrixWorld);
+  p.quat = mesh.quaternion.clone().multiply(new THREE.Quaternion(...p.q));
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(p.quat);
+  p.yaw = Math.atan2(-fwd.x, -fwd.z); p.pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y)));
+}
+const feather = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 10; i++) { const v = Math.round(255 * (i + 1) / 10); g.fillStyle = `rgb(${v},${v},${v})`; g.fillRect(i, i, 256 - 2 * i, 256 - 2 * i); }
+  return new THREE.CanvasTexture(c);
+})();
+const SHEET = 2, texLoader = new THREE.TextureLoader();
+const photoMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false, alphaMap: feather });
+const photoQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), photoMat);
+photoQuad.renderOrder = 1e6; photoQuad.frustumCulled = false; photoQuad.visible = false;
+const photoRig = new THREE.Group(); photoRig.add(photoQuad); scene.add(photoRig);
+let photo = null, glide = null, locked = false;
+function showPhoto(p) {
+  photo = p; photoRig.position.copy(p.pos); photoRig.quaternion.copy(p.quat);
+  photoQuad.scale.set(p.w * SHEET, p.h * SHEET, 1); photoQuad.position.set(p.ox * SHEET, p.oy * SHEET, -SHEET);
+  photoMat.opacity = 0; photoQuad.visible = false;
+  texLoader.load(p.f, t => {
+    if (photo !== p) { t.dispose(); return; }
+    t.colorSpace = TEX_SPACE; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    photoMat.map?.dispose(); photoMat.map = t; photoMat.needsUpdate = true; photoQuad.visible = true; window.__photoReady = true;
+  });
+}
+function nearestPhoto(skip) {
+  let best = null, bd = Infinity;
+  for (const p of photos) { if (p === skip) continue; const d = p.pos.distanceToSquared(camera.position); if (d < bd) { bd = d; best = p; } }
+  return best;
+}
+function gotoPhoto(p, instant) {
+  if (!p) return;
+  showPhoto(p); locked = true;
+  if (instant) { pos.set(p.pos.x, p.pos.z); eye = p.pos.y; yaw = p.yaw; pitch = p.pitch; glide = null; }
+  else glide = { t: 0, x: pos.x, z: pos.y, eye, yaw, pitch, to: p };
+}   // standing eye height above the levelled floor
+const pos = new THREE.Vector2(cfg.start.p[0], cfg.start.p[2]);
+const cam = params.get('cam');
+if (cam) { const [x, z, y, p, h] = cam.split(',').map(Number); pos.set(x, z); yaw = (y || 0) * Math.PI / 180; pitch = (p || 0) * Math.PI / 180; if (h) eye = h; startEl.style.display = 'none'; }
+if (params.get('photo') !== null && photos.length) { gotoPhoto(photos[+params.get('photo') % photos.length], true); startEl.style.display = 'none'; }
+if (params.get('walk')) { const v = cfg.views[+params.get('walk') % cfg.views.length]; pos.set(v.p[0], v.p[2]); yaw = v.yaw; pitch = 0; startEl.style.display = 'none'; }
+const view = params.get('view');
+if (view !== null) { const v = cfg.views[+view % cfg.views.length]; pos.set(v.p[0], v.p[2]); eye = v.p[1]; yaw = v.yaw; pitch = v.pitch; startEl.style.display = 'none'; }
+
+addEventListener('error', e => { document.body.dataset.err = String(e.message); });
+addEventListener('unhandledrejection', e => { document.body.dataset.err = String(e.reason); });
+mesh.initialized.then(() => { document.body.dataset.splats = String(mesh.packedSplats?.numSplats ?? mesh.numSplats ?? 'loaded'); go.disabled = false; go.textContent = 'Click to enter'; document.title = 'Office Scan'; window.__ready = true; })
+  .catch(e => { go.textContent = 'Could not load the scan'; hud.textContent = String(e); });
+
+const setHud = () => hud.textContent = (document.pointerLockElement === canvas ? 'WASD walk · Shift faster · F nearest real photo · Q/E height · N ghost mode ' + (free ? '(on)' : '(off)') + ' · Esc release' : 'Click the view to look around with the mouse');
+startEl.addEventListener('click', () => { if (go.disabled) return; startEl.style.display = 'none'; canvas.requestPointerLock?.(); });
+canvas.addEventListener('click', () => { if (document.pointerLockElement !== canvas) canvas.requestPointerLock?.(); });
+document.addEventListener('pointerlockchange', () => { dot.style.display = document.pointerLockElement === canvas ? 'block' : 'none'; setHud(); });
+let dragging = false;
+canvas.addEventListener('mousedown', () => dragging = true);
+addEventListener('mouseup', () => dragging = false);
+addEventListener('mousemove', e => {
+  const locked = document.pointerLockElement === canvas;
+  if (!locked && !dragging) return;
+  const k = locked ? 0.0022 : -0.004;
+  yaw -= e.movementX * k; pitch = Math.max(-1.45, Math.min(1.45, pitch - e.movementY * k));
+});
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyN') { free = !free; setHud(); } if (e.code === 'KeyX') { sharpen = !sharpen; setHud(); } if (e.code === 'KeyF') gotoPhoto(nearestPhoto(locked ? photo : null)); if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); });
+addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+// collision map built from the scan itself: desks, chairs, columns and walls are solid
+const col = cfg.collision, RAD = 0.22;
+const solidAt = (x, z) => { const i = Math.floor((x - col.x0) / col.cell), j = Math.floor((z - col.z0) / col.cell); return i < 0 || j < 0 || i >= col.nx || j >= col.nz || col.rows[j][i] === '1'; };
+const hits = (x, z) => solidAt(x, z) || solidAt(x + RAD, z) || solidAt(x - RAD, z) || solidAt(x, z + RAD) || solidAt(x, z - RAD) || solidAt(x + RAD * .7, z + RAD * .7) || solidAt(x - RAD * .7, z + RAD * .7) || solidAt(x + RAD * .7, z - RAD * .7) || solidAt(x - RAD * .7, z - RAD * .7);
+const allowed = (x, z) => free || !hits(x, z) || hits(pos.x, pos.y);   // if already inside something, let the walker out
+const vel = new THREE.Vector2(); let bob = 0;
+
+// self-check mode: ?shot=name posts a rendered frame back to the local server
+const shot = params.get('shot'); let shotAt = 0, shotDone = false;
+const report = t => shot && fetch('/log/' + shot, { method: 'POST', body: t });
+if (shot) { startEl.style.display = 'none'; mesh.initialized.then(() => { shotAt = performance.now() + (params.get('photo') !== null ? 9000 : 6000); }, e => report('load failed: ' + e)); addEventListener('error', e => report('error: ' + e.message)); addEventListener('unhandledrejection', e => report('rejection: ' + e.reason)); }
+// ---- sharpening pass: render to a texture, then a contrast-adaptive unsharp filter on a full-screen quad ----
+let sharpen = params.get('sharpen') !== null ? params.get('sharpen') !== '0' : SHARPEN_DEFAULT;
+const rt = new THREE.WebGLRenderTarget(4, 4, { depthBuffer: true });   // un-encoded on purpose, see POST above
+// The "look": sharpening plus a picture grade. Neutral values (bright 1, contrast 1, sat 1, blacks 0) reproduce the
+// real photos' tones exactly; LOOK_DEFAULT is the tuned touch-up. Sliders (key G) change it live and are remembered
+// in this browser; URL parameters of the same names override everything (used for test screenshots).
+const LOOK_DEFAULT = { amount: 0.25, bright: 1, contrast: 1.4, sat: 1.18, blacks: 0.05 };   // "Punchy", chosen by the user on 2026-11-11
+const look = { ...LOOK_DEFAULT };
+if (!shot) try { Object.assign(look, JSON.parse(localStorage.getItem('officeLook') || '{}')); } catch (e) {}
+for (const k in look) if (params.get(k) !== null) look[k] = +params.get(k);
+const sharpMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: rt.texture }, px: { value: new THREE.Vector2() }, amount: { value: 0 }, contrast: { value: 1 }, saturation: { value: 1 }, bright: { value: 1 }, blacks: { value: 0 } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `uniform sampler2D tex; uniform vec2 px; uniform float amount, contrast, saturation, bright, blacks; varying vec2 vUv;
+    void main() {
+      vec3 c = texture2D(tex, vUv).rgb;
+      vec3 n = texture2D(tex, vUv + vec2(0.0, px.y)).rgb, s = texture2D(tex, vUv - vec2(0.0, px.y)).rgb;
+      vec3 e = texture2D(tex, vUv + vec2(px.x, 0.0)).rgb, w = texture2D(tex, vUv - vec2(px.x, 0.0)).rgb;
+      vec3 lo = min(c, min(min(n, s), min(e, w))), hi = max(c, max(max(n, s), max(e, w)));
+      vec3 sharp = c + amount * (4.0 * c - n - s - e - w);
+      vec3 col = clamp(sharp, lo - 0.03, hi + 0.03);                  // limit overshoot so edges get steeper without halos
+      col = clamp((col - blacks) / (1.0 - blacks), 0.0, 1.0);         // black level: pulls a grey veil back down to black
+      col = pow(col, vec3(1.0 / bright));                              // brightness as a mid-tone lift, so whites never clip
+      col = mix(col, col * col * (3.0 - 2.0 * col), contrast - 1.0);   // contrast as an S-curve: black and white stay put
+      float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = mix(vec3(luma), col, saturation);                          // colour strength
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }`,
+  depthTest: false, depthWrite: false });
+const fsScene = new THREE.Scene(), fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), sharpMat); fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+const bufSize = new THREE.Vector2();
+function renderFrame() {
+  if (!POST) { renderer.render(scene, camera); return; }
+  const u = sharpMat.uniforms, on = sharpen;      // X switches the whole look off, leaving the plain scan
+  u.amount.value = on ? look.amount : 0; u.contrast.value = on ? look.contrast : 1; u.saturation.value = on ? look.sat : 1; u.bright.value = on ? look.bright : 1; u.blacks.value = on ? look.blacks : 0;
+  renderer.getDrawingBufferSize(bufSize);
+  if (rt.width !== bufSize.x || rt.height !== bufSize.y) { rt.setSize(bufSize.x, bufSize.y); sharpMat.uniforms.px.value.set(1 / bufSize.x, 1 / bufSize.y); }
+  renderer.setRenderTarget(rt); renderer.render(scene, camera);
+  renderer.setRenderTarget(null); renderer.render(fsScene, fsCam);
+}
+
+// picture controls panel (key G): sliders for the look, remembered in this browser
+const lookEl = document.getElementById('look');
+const SLIDERS = { bright: [0.7, 1.4, 'Brightness'], contrast: [0.6, 1.8, 'Contrast'], sat: [0.5, 1.6, 'Colour'], blacks: [0, 0.15, 'Haze cut'], amount: [0, 0.6, 'Sharpening'] };
+const PRESETS = {
+  Neutral: { amount: 0.12, bright: 1, contrast: 1, sat: 1, blacks: 0 },           // tones exactly as in the real photos
+  Clear: { amount: 0.2, bright: 1.03, contrast: 1.2, sat: 1.08, blacks: 0.03 },
+  Punchy: { amount: 0.25, bright: 1, contrast: 1.4, sat: 1.18, blacks: 0.05 },
+  Bright: { amount: 0.15, bright: 1.15, contrast: 1.15, sat: 1.05, blacks: 0.02 } };
+const saveLook = () => { try { localStorage.setItem('officeLook', JSON.stringify(look)); } catch (e) {} };
+const lookText = () => Object.keys(SLIDERS).map(k => k + ' ' + (+look[k]).toFixed(2)).join(', ');
+function buildLook() {
+  lookEl.innerHTML = '<b>Picture</b>';
+  const pre = document.createElement('div'); pre.className = 'presets';
+  for (const name in PRESETS) { const b = document.createElement('button'); b.textContent = name; b.addEventListener('click', () => { Object.assign(look, PRESETS[name]); saveLook(); buildLook(); }); pre.append(b); }
+  lookEl.append(pre);
+  for (const k in SLIDERS) {
+    const [lo, hi, label] = SLIDERS[k], row = document.createElement('label'), inp = document.createElement('input'), val = document.createElement('i');
+    inp.type = 'range'; inp.min = lo; inp.max = hi; inp.step = (hi - lo) / 100; inp.value = look[k]; val.textContent = (+look[k]).toFixed(2);
+    inp.addEventListener('input', () => { look[k] = +inp.value; val.textContent = look[k].toFixed(2); out.textContent = lookText(); saveLook(); });
+    row.append(label, inp, val); lookEl.append(row);
+  }
+  const out = document.createElement('p'); out.textContent = lookText(); lookEl.append(out);       // the values to report back
+  const copy = document.createElement('button'); copy.textContent = 'Copy these settings';
+  copy.addEventListener('click', () => { navigator.clipboard?.writeText(lookText()).then(() => { copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy these settings', 1200); }, () => {}); });
+  const reset = document.createElement('button'); reset.textContent = 'Reset to default';
+  reset.addEventListener('click', () => { Object.assign(look, LOOK_DEFAULT); try { localStorage.removeItem('officeLook'); } catch (e) {} buildLook(); });
+  lookEl.append(copy, reset);
+}
+buildLook();
+addEventListener('keydown', e => { if (e.code === 'KeyG') { const show = lookEl.style.display !== 'block'; lookEl.style.display = show ? 'block' : 'none'; if (show) document.exitPointerLock?.(); } });
+
+// batch mode (?batch=novel.json): render a list of viewpoints at a fixed size and post each frame to the local server
+let batch = null;
+if (params.get('batch')) {
+  startEl.style.display = 'none';
+  const spec = await (await fetch(params.get('batch'), { cache: 'no-store' })).json();
+  renderer.setPixelRatio(1); renderer.setSize(spec.w, spec.h, false);
+  camera.aspect = spec.w / spec.h; camera.fov = spec.fovy; camera.updateProjectionMatrix();
+  await mesh.initialized;
+  batch = { poses: spec.poses, i: +(params.get('from') || 0), since: 0, frames: 0, busy: false, prefix: params.get('prefix') || '' };
+}
+function batchStep(now) {
+  const b = batch; if (b.busy) return;
+  if (b.i >= b.poses.length) { batch = null; fetch('/log/batch_done', { method: 'POST', body: String(b.poses.length) }); return; }
+  const v = b.poses[b.i];
+  camera.position.set(...v.p);
+  if (v.q) camera.quaternion.set(...v.q); else camera.rotation.set(v.pitch, v.yaw, 0, 'YXZ');      // q: exact orientation including roll
+  if (v.fovy && camera.fov !== v.fovy) { camera.fov = v.fovy; camera.updateProjectionMatrix(); }   // per-view zoom
+  if (v.fx) {                                    // exact pinhole camera of a real image (off-centre lens axis allowed)
+    const n = camera.near, W = renderer.domElement.width, H = renderer.domElement.height;
+    camera.projectionMatrix.makePerspective(-v.cx / v.fx * n, (W - v.cx) / v.fx * n, v.cy / v.fy * n, -(H - v.cy) / v.fy * n, n, camera.far);
+    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+  }
+  if (!b.since) { b.since = now; b.frames = 0; }
+  renderer.render(scene, camera); b.frames++;
+  // give the splat sorter time to settle on the new viewpoint; the very first view also has to wait for the splats to reach the GPU
+  if (now - b.since > Math.max(num('settle', 700), b.shots ? 0 : 6000) && b.frames >= 6) {
+    b.busy = true;
+    canvas.toBlob(blob => fetch('/shot/' + b.prefix + v.n, { method: 'POST', body: blob }).then(() => { b.i++; b.shots = (b.shots || 0) + 1; b.since = 0; b.busy = false; }));
+  }
+}
+let last = performance.now();
+renderer.setAnimationLoop(now => {
+  if (batch) { batchStep(now); return; }
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+  const s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  // walking pace 1.4 m/s (brisk 3.2 with Shift), with a little inertia so starts and stops feel physical
+  if (glide) {                                   // gliding to a photo spot
+    glide.t = Math.min(1, glide.t + dt / 0.9); const k = glide.t * glide.t * (3 - 2 * glide.t), to = glide.to;
+    let dy = to.yaw - glide.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+    pos.set(glide.x + (to.pos.x - glide.x) * k, glide.z + (to.pos.z - glide.z) * k);
+    eye = glide.eye + (to.pos.y - glide.eye) * k; yaw = glide.yaw + dy * k; pitch = glide.pitch + (to.pitch - glide.pitch) * k;
+    vel.set(0, 0); if (glide.t >= 1) glide = null;
+  } else if (f || s) locked = false;             // walking away releases the photo
+  const sp = (!glide && (f || s)) ? (keys.ShiftLeft || keys.ShiftRight ? 3.2 : 1.4) / Math.hypot(f, s) : 0;
+  const tx = (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp, tz = (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
+  const ease = 1 - Math.exp(-dt * 10);
+  vel.x += (tx - vel.x) * ease; vel.y += (tz - vel.y) * ease;
+  const dx = vel.x * dt, dz = vel.y * dt;
+  if (allowed(pos.x + dx, pos.y)) pos.x += dx; else vel.x = 0;
+  if (allowed(pos.x, pos.y + dz)) pos.y += dz; else vel.y = 0;
+  const speed = vel.length(); bob += speed * dt * 4.4;
+  baseEye = Math.max(0.3, Math.min(2.6, baseEye + ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * dt));
+  if (!locked && !glide) eye += (baseEye - eye) * (1 - Math.exp(-dt * 4));
+  camera.position.set(pos.x, eye + Math.sin(bob) * 0.012 * Math.min(speed, 1.4), pos.y);
+  if (photo) {                                   // the photo is only valid from where it was taken: fade it with distance
+    const d = camera.position.distanceTo(photo.pos), target = glide ? Math.max(0, glide.t * 2 - 1) : Math.max(0, 1 - d / 0.2);
+    photoMat.opacity += (target - photoMat.opacity) * (1 - Math.exp(-dt * 12));
+    if (BARE) photoMat.opacity = 0;              // ?bare: stand at the photo spot but show only the scan (for comparisons)
+    if (!glide && !locked && d > 0.6) { photo = null; photoQuad.visible = false; }
+  }
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+  renderFrame();
+  if (shotAt && now > shotAt && !shotDone) { shotDone = true; canvas.toBlob(b => fetch('/shot/' + shot, { method: 'POST', body: b }).then(() => report('ok splats=' + document.body.dataset.splats))); }
+});
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+setHud();
+</script>
+</body>
+</html>

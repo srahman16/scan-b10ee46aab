@@ -1,0 +1,63 @@
+{
+ "name": "office.ply",
+ "bytes": 896229650,
+ "sha256": "fa8860a5a381e3529899570c5524b7051532a1c74bc400e840f69e5b7aad798d",
+ "parts": [
+  {
+   "f": "data/office-00.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-01.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-02.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-03.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-04.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-05.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-06.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-07.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-08.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-09.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-10.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-11.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-12.bin",
+   "bytes": 67108864
+  },
+  {
+   "f": "data/office-13.bin",
+   "bytes": 23814418
+  }
+ ]
+}
