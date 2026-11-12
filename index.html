@@ -8,7 +8,7 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0f13; font-family: "Segoe UI", system-ui, sans-serif; color: #f2f4f7; }
   canvas { display: block; }
-  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(8, 11, 16, .6); cursor: pointer; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(8, 11, 16, .6); z-index: 5; }
   #card { max-width: 440px; margin: 16px; padding: 28px 30px; border-radius: 14px; background: rgba(18, 23, 31, .94); border: 1px solid rgba(255,255,255,.12); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
   #card h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; }
   #card p { margin: 0 0 16px; color: #b8c0cc; font-size: 14px; line-height: 1.5; }
@@ -27,6 +27,12 @@
   #look .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 8px; }
   #look .presets button { margin: 0; padding: 5px 0; }
   #look p { margin: 8px 0 0; color: #9aa3af; font-size: 11px; line-height: 1.4; user-select: text; }
+  canvas { cursor: grab; touch-action: none; }
+  #pad { position: fixed; right: 16px; bottom: 16px; display: grid; grid-template-columns: repeat(3, 46px); gap: 6px; user-select: none; -webkit-user-select: none; }
+  #pad button { height: 46px; border: 1px solid rgba(255,255,255,.18); border-radius: 10px; background: rgba(18, 23, 31, .72); color: #fff; font-size: 18px; cursor: pointer; touch-action: none; padding: 0; }
+  #pad button:hover { background: rgba(40, 48, 60, .9); }
+  #pad button:active, #pad button.on { background: #e9a23b; color: #1b1407; }
+  #pad button.txt { font-size: 11px; font-weight: 600; }
   #dot { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,255,255,.7); box-shadow: 0 0 3px rgba(0,0,0,.8); pointer-events: none; display: none; }
 </style>
 <script type="importmap">
@@ -39,20 +45,22 @@
     <h1>Office Scan</h1>
     <p>A walkable 3D reconstruction of the office, computed from phone photos and videos of the room. Views between the shots were cleaned up with an AI repair step; press F to see the real photo taken nearest to where you stand.</p>
     <div class="keys">
-      <b>W A S D</b><span>Walk (arrow keys also work)</span>
-      <b>Mouse</b><span>Look around</span>
-      <b>Shift</b><span>Walk faster</span>
-      <b>Q / E</b><span>Lower / raise your eye height</span>
+      <b>Click</b><span>Click a spot on the floor to walk there</span>
+      <b>Drag</b><span>Hold and drag to look around</span>
+      <b>Scroll</b><span>Step forward / back (two fingers on a trackpad; sideways turns)</span>
+      <b>Arrows</b><span>Up / down walk, left / right turn. W A S D also walk, Shift is faster</span>
       <b>F</b><span>Jump to the nearest real photo for full detail (press again for the next one)</span>
       <b>G</b><span>Picture controls: brightness, contrast, colour, haze cut, sharpening</span>
-      <b>X</b><span>Picture touch-up on/off (off shows the plain scan)</span>
-      <b>N</b><span>Ghost mode: pass through furniture and walls (on/off)</span>
-      <b>Esc</b><span>Release the mouse</span>
+      <b>More</b><span>Q / E eye height · Home level the view · N pass through walls · X touch-up on/off · M game-style mouse look</span>
     </div>
     <button id="go" disabled>Loading scan…</button>
   </div>
 </div>
 <div id="dot"></div>
+<div id="pad">
+  <button data-k="ArrowLeft" title="Turn left">&#8630;</button><button data-k="ArrowUp" title="Walk forward">&#9650;</button><button data-k="ArrowRight" title="Turn right">&#8631;</button>
+  <button data-a="photo" class="txt" title="Nearest real photo (F)">Photo</button><button data-k="ArrowDown" title="Walk back">&#9660;</button><button data-a="help" class="txt" title="Show the controls">Help</button>
+</div>
 <div id="hud"></div>
 <div id="look"></div>
 
@@ -198,30 +206,100 @@ addEventListener('unhandledrejection', e => { document.body.dataset.err = String
 mesh.initialized.then(() => { document.body.dataset.splats = String(mesh.packedSplats?.numSplats ?? mesh.numSplats ?? 'loaded'); go.disabled = false; go.textContent = 'Click to enter'; document.title = 'Office Scan'; window.__ready = true; })
   .catch(e => { go.textContent = 'Could not load the scan'; hud.textContent = String(e); });
 
-const setHud = () => hud.textContent = (document.pointerLockElement === canvas ? 'WASD walk · Shift faster · F nearest real photo · Q/E height · N ghost mode ' + (free ? '(on)' : '(off)') + ' · Esc release' : 'Click the view to look around with the mouse');
-startEl.addEventListener('click', () => { if (go.disabled) return; startEl.style.display = 'none'; canvas.requestPointerLock?.(); });
-canvas.addEventListener('click', () => { if (document.pointerLockElement !== canvas) canvas.requestPointerLock?.(); });
-document.addEventListener('pointerlockchange', () => { dot.style.display = document.pointerLockElement === canvas ? 'block' : 'none'; setHud(); });
-let dragging = false;
-canvas.addEventListener('mousedown', () => dragging = true);
-addEventListener('mouseup', () => dragging = false);
-addEventListener('mousemove', e => {
-  const locked = document.pointerLockElement === canvas;
-  if (!locked && !dragging) return;
-  const k = locked ? 0.0022 : -0.004;
-  yaw -= e.movementX * k; pitch = Math.max(-1.45, Math.min(1.45, pitch - e.movementY * k));
+// ---- navigation ------------------------------------------------------------------------------------------------
+// Made for a laptop trackpad as much as a mouse, and nothing has to be held down: click a spot on the floor to walk
+// there, scroll to step forward/back, arrow keys walk and turn. Dragging turns the view at exactly the pointer's own
+// speed (the scene stays under the cursor), and a mostly-sideways drag does not tilt the view up or down.
+const SENS = num('sens', 1), PITCH_MAX = 1.45;
+const mouseLook = () => document.pointerLockElement === canvas;      // optional game-style look, key M
+const setHud = () => hud.textContent = mouseLook() ? 'Mouse look on · click to walk to the dot · M or Esc to leave'
+  : 'Click the floor to walk there · drag to look · scroll to move · arrow keys walk and turn' + (free ? ' · passing through walls (N)' : '');
+startEl.addEventListener('click', () => { if (!go.disabled) startEl.style.display = 'none'; });
+document.addEventListener('pointerlockchange', () => { dot.style.display = mouseLook() ? 'block' : 'none'; setHud(); });
+let lookX = 0, lookY = 0, biasX = 0, biasY = 0, turnVel = 0, scrollDist = 0, walk = null, drag = null, markT = 0, level = false;
+function addLook(dx, dy, k) {                 // queue a turn; it is eased in over a few frames so the view never jerks
+  biasX = biasX * 0.85 + Math.abs(dx); biasY = biasY * 0.85 + Math.abs(dy);
+  const share = biasY / (biasX + biasY + 1e-6);                      // how much of the recent movement is up/down
+  lookX += dx * k; lookY += dy * k * Math.max(0, Math.min(1, (share - 0.3) / 0.25));
+}
+// the floor marker: shows where a click will take you
+const mark = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.14, 48).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+mark.renderOrder = 1e6 - 1; mark.frustumCulled = false; mark.visible = false; scene.add(mark);
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function floorPoint(cx, cy) {                 // where the line of sight through a screen point meets the floor
+  ndc.set(cx / innerWidth * 2 - 1, 1 - cy / innerHeight * 2); ray.setFromCamera(ndc, camera);
+  const o = ray.ray.origin, d = ray.ray.direction, h = Math.hypot(d.x, d.z) || 1e-6, down = d.y < -0.03;
+  const dist = down ? Math.min(o.y / -d.y * h, 7) : 2.5;             // aimed at a wall or the ceiling: a few steps that way
+  return { x: o.x + d.x / h * dist, z: o.z + d.z / h * dist, down };
+}
+function walkToScreen(cx, cy) {
+  const p = floorPoint(cx, cy); walk = { x: p.x, z: p.z, stuck: 0 }; scrollDist = 0;
+  mark.position.set(p.x, 0.02, p.z); markT = 0.95;
+}
+canvas.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || mouseLook()) return;
+  drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
 });
+canvas.addEventListener('pointermove', e => {
+  if (mouseLook()) return;
+  if (!drag || e.pointerId !== drag.id) {                             // hovering: preview the spot a click would walk to
+    if (e.pointerType === 'mouse' && !walk) { const p = floorPoint(e.clientX, e.clientY); if (p.down && (free || !hits(p.x, p.z))) { mark.position.set(p.x, 0.02, p.z); markT = 0.45; } else markT = 0; }
+    return;
+  }
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  drag.moved += Math.abs(dx) + Math.abs(dy);
+  if (drag.moved > 6) { addLook(dx, dy, 2 * Math.tan(camera.fov * Math.PI / 360) / innerHeight * SENS); canvas.style.cursor = 'grabbing'; if (!walk) markT = 0; }
+});
+const endDrag = e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const tap = drag.moved <= 6 && e.type === 'pointerup'; drag = null; canvas.style.cursor = '';
+  if (tap) walkToScreen(e.clientX, e.clientY);
+};
+canvas.addEventListener('pointerup', endDrag); canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerleave', () => { if (!walk) markT = 0; });
+document.addEventListener('mousemove', e => { if (mouseLook()) addLook(e.movementX, e.movementY, -0.0012 * SENS); });
+canvas.addEventListener('click', () => { if (mouseLook()) walkToScreen(innerWidth / 2, innerHeight / 2); });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) lookX -= e.deltaX * unit * 0.0012 * SENS;                 // sideways swipe turns
+  else { scrollDist = Math.max(-3, Math.min(3, scrollDist - e.deltaY * unit * 0.004)); walk = null; markT = 0; }   // one wheel notch is about 0.4 m
+}, { passive: false });
 const keys = {};
-addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyN') { free = !free; setHud(); } if (e.code === 'KeyX') { sharpen = !sharpen; setHud(); } if (e.code === 'KeyF') gotoPhoto(nearestPhoto(locked ? photo : null)); if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault(); });
+const NAV_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+const nextPhoto = () => gotoPhoto(nearestPhoto(locked ? photo : null));
+addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  keys[e.code] = true;
+  if (NAV_KEYS.includes(e.code)) { walk = null; scrollDist = 0; markT = 0; }
+  if (e.code === 'KeyN') { free = !free; setHud(); }
+  if (e.code === 'KeyX') { sharpen = !sharpen; setHud(); }
+  if (e.code === 'KeyF') nextPhoto();
+  if (e.code === 'Home') { lookY = 0; level = true; }
+  if (e.code === 'KeyM') { if (mouseLook()) document.exitPointerLock?.(); else canvas.requestPointerLock?.(); }
+  if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'Home') e.preventDefault();
+});
 addEventListener('keyup', e => keys[e.code] = false);
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; drag = null; });
+// on-screen buttons, for touch screens and for anyone who prefers them
+for (const b of document.querySelectorAll('#pad button')) {
+  const k = b.dataset.k;
+  if (k) {
+    const set = on => { keys[k] = on; b.classList.toggle('on', on); if (on) { walk = null; scrollDist = 0; markT = 0; } };
+    b.addEventListener('pointerdown', e => { e.preventDefault(); try { b.setPointerCapture(e.pointerId); } catch (err) {} set(true); });
+    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, () => set(false));
+  } else b.addEventListener('click', () => { if (b.dataset.a === 'photo') nextPhoto(); else startEl.style.display = 'flex'; b.blur(); });
+  b.addEventListener('contextmenu', e => e.preventDefault());
+}
+window.__pose = () => [pos.x, pos.y, eye, yaw, pitch];             // read by the self-checks
 
 // collision map built from the scan itself: desks, chairs, columns and walls are solid
 const col = cfg.collision, RAD = 0.22;
 const solidAt = (x, z) => { const i = Math.floor((x - col.x0) / col.cell), j = Math.floor((z - col.z0) / col.cell); return i < 0 || j < 0 || i >= col.nx || j >= col.nz || col.rows[j][i] === '1'; };
 const hits = (x, z) => solidAt(x, z) || solidAt(x + RAD, z) || solidAt(x - RAD, z) || solidAt(x, z + RAD) || solidAt(x, z - RAD) || solidAt(x + RAD * .7, z + RAD * .7) || solidAt(x - RAD * .7, z + RAD * .7) || solidAt(x + RAD * .7, z - RAD * .7) || solidAt(x - RAD * .7, z - RAD * .7);
 const allowed = (x, z) => free || !hits(x, z) || hits(pos.x, pos.y);   // if already inside something, let the walker out
-const vel = new THREE.Vector2(); let bob = 0;
+const vel = new THREE.Vector2();
 
 // self-check mode: ?shot=name posts a rendered frame back to the local server
 const shot = params.get('shot'); let shotAt = 0, shotDone = false;
@@ -335,26 +413,47 @@ renderer.setAnimationLoop(now => {
   if (batch) { batchStep(now); return; }
   const dt = Math.min((now - last) / 1000, 0.05); last = now;
   const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
-  const s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  const fast = keys.ShiftLeft || keys.ShiftRight;
+  // looking: queued pointer movement is eased in, the arrow keys turn at a steady rate
+  const la = 1 - Math.exp(-dt * 28);
+  turnVel += (((keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0)) * (fast ? 2.0 : 1.2) - turnVel) * (1 - Math.exp(-dt * 9));
+  if (glide) { lookX = lookY = 0; level = false; }
+  else {
+    yaw += lookX * la + turnVel * dt; lookX *= 1 - la;
+    if (lookY) { pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, pitch + lookY * la)); lookY *= 1 - la; if (Math.abs(lookY) < 1e-5) lookY = 0; }
+    if (level) { pitch *= Math.exp(-dt * 6); if (Math.abs(pitch) < 0.003 || drag) level = false; }
+  }
   // walking pace 1.4 m/s (brisk 3.2 with Shift), with a little inertia so starts and stops feel physical
+  let tx = 0, tz = 0;
   if (glide) {                                   // gliding to a photo spot
     glide.t = Math.min(1, glide.t + dt / 0.9); const k = glide.t * glide.t * (3 - 2 * glide.t), to = glide.to;
     let dy = to.yaw - glide.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
     pos.set(glide.x + (to.pos.x - glide.x) * k, glide.z + (to.pos.z - glide.z) * k);
     eye = glide.eye + (to.pos.y - glide.eye) * k; yaw = glide.yaw + dy * k; pitch = glide.pitch + (to.pitch - glide.pitch) * k;
-    vel.set(0, 0); if (glide.t >= 1) glide = null;
-  } else if (f || s) locked = false;             // walking away releases the photo
-  const sp = (!glide && (f || s)) ? (keys.ShiftLeft || keys.ShiftRight ? 3.2 : 1.4) / Math.hypot(f, s) : 0;
-  const tx = (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp, tz = (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
+    vel.set(0, 0); walk = null; scrollDist = 0; markT = 0; if (glide.t >= 1) glide = null;
+  } else if (f || s) {                           // keys
+    const sp = (fast ? 3.2 : 1.4) / Math.hypot(f, s);
+    tx = (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp; tz = (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
+  } else if (walk) {                             // walking to a clicked spot: slows on arrival, gives up if blocked
+    const wx = walk.x - pos.x, wz = walk.z - pos.y, d = Math.hypot(wx, wz);
+    if (d < 0.06 || walk.stuck > 0.4) { walk = null; markT = 0; }
+    else { const sp = Math.min(1.6, 0.25 + d * 2.2); tx = wx / d * sp; tz = wz / d * sp; }
+  } else if (Math.abs(scrollDist) > 0.004) {     // scroll wheel / two-finger swipe: a measured step forward or back
+    const v = Math.max(-2.4, Math.min(2.4, scrollDist * 5)); scrollDist -= v * dt;
+    tx = -Math.sin(yaw) * v; tz = -Math.cos(yaw) * v;
+  } else scrollDist = 0;
+  if (tx || tz) locked = false;                  // walking away releases the photo
   const ease = 1 - Math.exp(-dt * 10);
   vel.x += (tx - vel.x) * ease; vel.y += (tz - vel.y) * ease;
-  const dx = vel.x * dt, dz = vel.y * dt;
+  const dx = vel.x * dt, dz = vel.y * dt, px = pos.x, pz = pos.y;
   if (allowed(pos.x + dx, pos.y)) pos.x += dx; else vel.x = 0;
   if (allowed(pos.x, pos.y + dz)) pos.y += dz; else vel.y = 0;
-  const speed = vel.length(); bob += speed * dt * 4.4;
+  if (walk) walk.stuck = Math.hypot(pos.x - px, pos.y - pz) < 0.25 * Math.hypot(tx, tz) * dt ? walk.stuck + dt : 0;
+  mark.material.opacity += (markT - mark.material.opacity) * (1 - Math.exp(-dt * 14)); mark.visible = mark.material.opacity > 0.02;
   baseEye = Math.max(0.3, Math.min(2.6, baseEye + ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * dt));
   if (!locked && !glide) eye += (baseEye - eye) * (1 - Math.exp(-dt * 4));
-  camera.position.set(pos.x, eye + Math.sin(bob) * 0.012 * Math.min(speed, 1.4), pos.y);
+  camera.position.set(pos.x, eye, pos.y);      // no head-bob: a steady view is easier to follow
   if (photo) {                                   // the photo is only valid from where it was taken: fade it with distance
     const d = camera.position.distanceTo(photo.pos), target = glide ? Math.max(0, glide.t * 2 - 1) : Math.max(0, 1 - d / 0.2);
     photoMat.opacity += (target - photoMat.opacity) * (1 - Math.exp(-dt * 12));
